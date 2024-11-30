@@ -1,0 +1,15 @@
+{
+  "required": true,
+  "minVersion": "0.8.5",
+  "package": "net.bagaja.dualwieldingpickaxe.mixin",
+  "compatibilityLevel": "JAVA_17",
+  "refmap": "dualwieldingpickaxe.refmap.json",
+  "mixins": [
+  ],
+  "client": [
+
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

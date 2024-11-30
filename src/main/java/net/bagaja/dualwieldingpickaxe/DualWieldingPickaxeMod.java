@@ -3,35 +3,54 @@ package net.bagaja.dualwieldingpickaxe;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.EquipmentSlot;
-import net.minecraft.world.entity.ai.attributes.AttributeModifier;
-import net.minecraft.world.entity.ai.attributes.Attributes;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.*;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraftforge.common.MinecraftForge;
+import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.event.entity.player.PlayerInteractEvent;
 import net.minecraftforge.event.entity.player.AttackEntityEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
 
-import java.util.HashMap;
-import java.util.Map;
+import java.util.HashMap; import java.util.Map;
+
+import static net.minecraft.world.item.Tiers.*;
 
 @Mod("dualwieldingpickaxe")
 public class DualWieldingPickaxeMod {
     private final Map<BlockPos, Float> miningProgress = new HashMap<>();
     private final Map<Player, BlockPos> lastMinedBlock = new HashMap<>();
+    public static final Map<Player, Boolean> isOffhandMining = new HashMap<>();
 
     public DualWieldingPickaxeMod() {
         MinecraftForge.EVENT_BUS.register(this);
     }
 
     @SubscribeEvent
+    public void onPlayerTick(TickEvent.PlayerTickEvent event) {
+        if (event.phase == TickEvent.Phase.END) {
+            Player player = event.player;
+            BlockPos lastPos = lastMinedBlock.get(player);
+
+            // Clear mining animation if player stopped mining
+            if (!isOffhandMining.getOrDefault(player, false) && lastPos != null) {
+                event.player.level().destroyBlockProgress(player.getId(), lastPos, -1);
+                lastMinedBlock.remove(player);
+                miningProgress.remove(lastPos);
+            }
+        }
+    }
+
+    @SubscribeEvent
     public void onLeftClickBlock(PlayerInteractEvent.LeftClickBlock event) {
         Player player = event.getEntity();
+        ItemStack mainhandItem = player.getMainHandItem();
         ItemStack offhandItem = player.getOffhandItem();
 
-        if (!offhandItem.isEmpty() && offhandItem.getItem() instanceof PickaxeItem) {
+        // Only process if offhand has pickaxe and mainhand doesn't
+        if (!offhandItem.isEmpty() && offhandItem.getItem() instanceof PickaxeItem &&
+                !(mainhandItem.getItem() instanceof PickaxeItem)) {
             handleOffhandMining(player, offhandItem, event);
         }
     }
@@ -49,52 +68,78 @@ public class DualWieldingPickaxeMod {
     private void handleOffhandMining(Player player, ItemStack offhandItem, PlayerInteractEvent.LeftClickBlock event) {
         BlockPos pos = event.getPos();
         BlockState state = event.getLevel().getBlockState(pos);
+
+        // Cancel vanilla mining animation and block breaking
+        event.setCanceled(true);
+
+        // Stop mainhand animation
+        player.stopUsingItem();
+
+        Tier pickaxeTier = ((TieredItem)offhandItem.getItem()).getTier();
+        boolean canHarvestBlock = offhandItem.isCorrectToolForDrops(state);  // Changed this line
         float destroySpeed = offhandItem.getDestroySpeed(state);
 
         if (destroySpeed > 1.0F) {
-            // Cancel the main hand event
-            event.setCanceled(true);
+            // Set mining flag
+            isOffhandMining.put(player, true);
 
-            // Check if player started mining a different block
+            // Reset progress if mining a different block
             BlockPos lastPos = lastMinedBlock.get(player);
             if (lastPos == null || !lastPos.equals(pos)) {
+                if (lastPos != null) {
+                    event.getLevel().destroyBlockProgress(player.getId(), lastPos, -1);
+                }
                 miningProgress.remove(lastPos);
                 lastMinedBlock.put(player, pos);
             }
 
-            // Calculate mining speed more accurately
+            // Calculate mining speed
             float hardness = state.getDestroySpeed(event.getLevel(), pos);
             float speedMultiplier = destroySpeed / hardness;
+            float tierSpeedModifier = getTierSpeedModifier(pickaxeTier);
+            speedMultiplier *= tierSpeedModifier;
 
-            // Factor in the proper mining speed calculation
-            boolean canHarvest = ((TieredItem)offhandItem.getItem()).getTier().getEnchantmentValue() >= state.getBlock().getExplosionResistance();
-            float miningSpeedMod = canHarvest ? speedMultiplier : 1.0f;
-
-            // Get current progress or start from 0
+            // Update progress
             float progress = miningProgress.getOrDefault(pos, 0f);
-
-            // Add mining progress with adjusted speed
-            progress += (miningSpeedMod / 30f) * (canHarvest ? 1.0f : 0.3f);
+            if (canHarvestBlock) {
+                progress += (speedMultiplier / 30f);
+            } else {
+                progress += (speedMultiplier / 100f);
+            }
             miningProgress.put(pos, progress);
 
-            // Break the block if mining is complete
+            // Break block if complete
             if (progress >= 1.0f) {
-                // Only break if we can actually harvest it
-                if (canHarvest) {
+                if (canHarvestBlock) {
+                    // Use proper block breaking method
                     event.getLevel().destroyBlock(pos, true, player);
                     offhandItem.hurtAndBreak(1, player, EquipmentSlot.OFFHAND);
                 }
                 miningProgress.remove(pos);
                 lastMinedBlock.remove(player);
+                isOffhandMining.put(player, false);
+                event.getLevel().destroyBlockProgress(player.getId(), pos, -1);
+            } else {
+                // Update block breaking animation
+                int stage = Math.min(9, (int)(progress * 10.0F));
+                event.getLevel().destroyBlockProgress(player.getId(), pos, stage);
+
+                // Play mining animation for offhand
+                player.swing(InteractionHand.OFF_HAND, true);
             }
-
-            // Play the mining animation
-            player.swing(InteractionHand.OFF_HAND);
-
-            // Update block breaking animation
-            int stage = (int) (progress * 10.0F);
-            event.getLevel().destroyBlockProgress(player.getId(), pos, stage);
         }
+    }
+
+    private float getTierSpeedModifier(Tier tier) {
+        // Adjust these values to balance mining speeds
+        return switch (tier) {
+            case WOOD -> 1.0f;    // Slowest
+            case STONE -> 1.0f;   // Slow
+            case IRON -> 1.0f;    // Normal
+            case DIAMOND -> 1.0f; // Fast
+            case NETHERITE -> 1.0f; // Fastest
+            default -> 1.0f;
+        };
     }
 
     private void handleOffhandAttack(Player player, ItemStack offhandItem, AttackEntityEvent event) {
